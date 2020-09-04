@@ -1,0 +1,1048 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Wishlist Application infrastructure
+Parameters:
+  APIName:
+    Type: String
+    Description: Name of the API - used to generate unique names for resources
+    MinLength: 3
+    MaxLength: 20
+    AllowedPattern: '^[a-zA-Z][a-zA-Z0-9_]*$'
+Resources:
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${APIName}-lambda-basic-role'
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action:
+            - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+              - lambda.amazonaws.com
+        Version: 2012-10-17
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSLambdaExecute
+      Path: /
+      
+  PreSignUpLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: nodejs12.x
+      Role: !GetAtt LambdaRole.Arn
+      Handler: index.handler
+      Code:
+        ZipFile: |
+          exports.handler = (event, context, callback) => {
+            event.response.autoConfirmUser = true;
+            callback(null,event);
+          };
+      Description: Invoke a function during stack creation.
+
+  UserPool:
+    Type: 'AWS::Cognito::UserPool'
+    DependsOn: PreSignUpLambda
+    Description: A Cognito user pool for authenticating users
+    Properties:
+      UserPoolName: !Sub '${APIName}-user-pool'
+      LambdaConfig: 
+        PreSignUp: !GetAtt PreSignUpLambda.Arn
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Mutable: true
+          Required: true
+        - Name: name
+          AttributeDataType: String
+          Mutable: false
+          Required: true
+          
+  LambdaSignUpPermission: 
+      Type: 'AWS::Lambda::Permission'
+      Properties:
+        Action: "lambda:InvokeFunction"
+        FunctionName:
+          Fn::GetAtt: [ "PreSignUpLambda", "Arn"]
+        Principal: "cognito-idp.amazonaws.com"
+        SourceArn: !GetAtt UserPool.Arn
+
+  UserPoolClient:
+    Type: 'AWS::Cognito::UserPoolClient'
+    Description: App Client used by AWS AppSync
+    Properties:
+      ClientName: !Sub '${APIName}-client-id'
+      GenerateSecret: false
+      UserPoolId: !Ref UserPool
+  DynamoDBEventTable:
+    Type: 'AWS::DynamoDB::Table'
+    Description: Dynamo DB event table
+    Properties:
+      TableName: !Sub '${APIName}-event-table'
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      ProvisionedThroughput:
+        ReadCapacityUnits: 2
+        WriteCapacityUnits: 2
+  DynamoDBWishTable:
+    Type: 'AWS::DynamoDB::Table'
+    Description: Dynamo DB wish table
+    Properties:
+      TableName: !Sub '${APIName}-wish-table'
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      ProvisionedThroughput:
+        ReadCapacityUnits: 2
+        WriteCapacityUnits: 2
+  DynamoDBUserContributionTable:
+    Type: 'AWS::DynamoDB::Table'
+    Description: Dynamo DB usercontribution table
+    Properties:
+      TableName: !Sub '${APIName}-contribution-table'
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      ProvisionedThroughput:
+        ReadCapacityUnits: 2
+        WriteCapacityUnits: 2
+  DynamoDBUserTable:
+    Type: 'AWS::DynamoDB::Table'
+    Description: Dynamo DB User table
+    Properties:
+      TableName: !Sub '${APIName}-user-table'
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      ProvisionedThroughput:
+        ReadCapacityUnits: 2
+        WriteCapacityUnits: 2
+  AppSyncDynamoDBPolicy:
+    Type: 'AWS::IAM::ManagedPolicy'
+    Properties:
+      Description: Policy for app sync to create table using dynamo db
+      Path: /appsync/
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - 'dynamodb:GetItem'
+              - 'dynamodb:PutItem'
+              - 'dynamodb:DeleteItem'
+              - 'dynamodb:UpdateItem'
+              - 'dynamodb:Query'
+              - 'dynamodb:Scan'
+              - 'dynamodb:BatchGetItem'
+              - 'dynamodb:BatchWriteItem'
+            Resource: 
+              - !Join [ "", [ !GetAtt DynamoDBEventTable.Arn, "*" ] ]
+              - !Join [ "", [ !GetAtt DynamoDBWishTable.Arn, "*" ] ]
+              - !Join [ "", [ !GetAtt DynamoDBUserContributionTable.Arn, "*" ] ]
+              - !Join [ "", [ !GetAtt DynamoDBUserTable.Arn, "*" ] ]
+
+  DynamoDBRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: !Sub '${APIName}-dynamodb-role'
+      ManagedPolicyArns:
+        - Ref: AppSyncDynamoDBPolicy
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - 'sts:AssumeRole'
+            Principal:
+              Service:
+                - appsync.amazonaws.com
+    DependsOn:
+      - AppSyncDynamoDBPolicy
+  AppSyncAPI:
+    Type: 'AWS::AppSync::GraphQLApi'
+    Description: The GraphQL API for the Application
+    Properties:
+      AuthenticationType: AMAZON_COGNITO_USER_POOLS
+      Name: !Sub '${APIName}'
+      UserPoolConfig:
+        UserPoolId: !Ref UserPool
+        AwsRegion: !Sub '${AWS::Region}'
+        DefaultAction: ALLOW
+        
+  AppSyncOpenAPI:
+    Type: 'AWS::AppSync::GraphQLApi'
+    Description: The GraphQL API for the Application
+    Properties:
+      AuthenticationType: API_KEY
+      Name: !Sub '${APIName}-open-api'
+
+  AppSyncAPISchema:
+    Type: 'AWS::AppSync::GraphQLSchema'
+    Properties:
+      ApiId: !GetAtt AppSyncAPI.ApiId
+      Definition: "schema {\n    query: Query\n    mutation: Mutation\n}\ntype Query {\n    # Get a single value of type 'Post' by primary key.\n    event(id: ID!): Event\n    eventall: [Event]\n    eventUserId(userId: String!): [Event]\n  \twish(id: ID!): Wish\n  \tuser(id: ID!): User\n}\ntype Mutation {\n    createEvent(name: String, endDate: String, organiserid: String, code:Int): Event\n    updateEvent(id: ID!, name: String, endDate: String, organiserid: String, code:Int): Event\n    deleteEvent(id: ID!): Event\n    createWish(wish:String, amount: Int, eventId: String): Wish\n    updateWish(id: ID! , wish: String, amount: Int,eventId: String): Wish\n    deleteWish(\tid: ID!): Wish\n    createUser(name: String, contact: String, email: String): User\n    editUser(id: ID!, name: String, contact: String,email: String): User\n    deleteUser(id: ID!): User\n    createParticipant(userId: String, wishId: String, amount:Int): UserContribution\n    editParticipant(id: ID!,userId: String,amount: Int): UserContribution\n    deleteParticipant(id: ID!): UserContribution\n}\n\ntype Event {\n  id: ID!\n  name: String\n  endDate: String\n  code: Int\n  organiserid: String\n wish:[Wish] \n }\n\ntype User {\n  id: ID!\n  name: String\n  contact: String\n  email: String\n}\n\ntype UserContribution{\n  id: ID!\n  userId: String\n  wishId: String\n  amount: Int\n  user: User\n  wish: Wish\n}\n\ntype Wish {\n  id: ID!\n  wish: String\n  amount: String\n  event: Event\n  participant: [UserContribution]\n}\n"
+
+  OpenAPIKey:
+    Type: AWS::AppSync::ApiKey
+    Properties: 
+      ApiId: !GetAtt AppSyncOpenAPI.ApiId
+      Description: 'Open API Key'
+
+  AppSyncOpenAPISchema:
+    Type: 'AWS::AppSync::GraphQLSchema'
+    Properties:
+      ApiId: !GetAtt AppSyncOpenAPI.ApiId
+      Definition: |
+        type Event {
+          id: ID!
+          name: String
+          endDate: String
+          code: Int
+          organiserid: String
+          wish: [Wish]
+        }
+        type Wish {
+          id: ID!
+          wish: String
+          amount: String
+          event: Event
+          participant: [UserContribution]
+        }
+        type UserContribution {
+          id: ID!
+          userId: String
+          wishId: String
+          amount: Int
+          user: User
+          wish: Wish
+        }
+        type User {
+          id: ID!
+          name: String
+          contact: String
+          email: String
+        }
+        type Query {
+          event(id: ID!): Event
+        }
+        type Mutation {
+          createUser(name: String, contact: String, email: String): User
+          editUser(id: ID!,name: String,contact: String,email: String): User
+          createParticipant(userId: String, wishId: String, amount: Int): UserContribution
+        }
+        type Schema {
+          query: Query
+          mutation: Mutation
+        }
+      
+      
+  AppSyncEventDataSource:
+    Type: 'AWS::AppSync::DataSource'
+    Properties:
+      ApiId: !GetAtt AppSyncAPI.ApiId
+      Name: !Sub '${APIName}_event_data_source'
+      Description: Datasource for aplication
+      Type: AMAZON_DYNAMODB
+      ServiceRoleArn: !GetAtt DynamoDBRole.Arn
+      DynamoDBConfig:
+        TableName: !Ref DynamoDBEventTable
+        AwsRegion: !Sub '${AWS::Region}'
+        
+  AppSyncEventDataOpenAPISource:
+    Type: 'AWS::AppSync::DataSource'
+    Properties:
+      ApiId: !GetAtt AppSyncOpenAPI.ApiId
+      Name: !Sub '${APIName}_openapi_event_data_source'
+      Description: Datasource for aplication
+      Type: AMAZON_DYNAMODB
+      ServiceRoleArn: !GetAtt DynamoDBRole.Arn
+      DynamoDBConfig:
+        TableName: !Ref DynamoDBEventTable
+        AwsRegion: !Sub '${AWS::Region}'
+        
+  AppSyncWishDataSource:
+    Type: 'AWS::AppSync::DataSource'
+    Properties:
+      ApiId: !GetAtt AppSyncAPI.ApiId
+      Name: !Sub '${APIName}_wish_data_source'
+      Description: Datasource for aplication
+      Type: AMAZON_DYNAMODB
+      ServiceRoleArn: !GetAtt DynamoDBRole.Arn
+      DynamoDBConfig:
+        TableName: !Ref DynamoDBWishTable
+        AwsRegion: !Sub '${AWS::Region}'
+        
+  AppSyncWishOpenAPIDataSource:
+    Type: 'AWS::AppSync::DataSource'
+    Properties:
+      ApiId: !GetAtt AppSyncOpenAPI.ApiId
+      Name: !Sub '${APIName}_wish_openapi_data_source'
+      Description: Datasource for aplication
+      Type: AMAZON_DYNAMODB
+      ServiceRoleArn: !GetAtt DynamoDBRole.Arn
+      DynamoDBConfig:
+        TableName: !Ref DynamoDBWishTable
+        AwsRegion: !Sub '${AWS::Region}'
+
+  AppSyncUserDataSource:
+    Type: 'AWS::AppSync::DataSource'
+    Properties:
+      ApiId: !GetAtt AppSyncAPI.ApiId
+      Name: !Sub '${APIName}_user_data_source'
+      Description: Datasource for user table for aplication
+      Type: AMAZON_DYNAMODB
+      ServiceRoleArn: !GetAtt DynamoDBRole.Arn
+      DynamoDBConfig:
+        TableName: !Ref DynamoDBUserTable
+        AwsRegion: !Sub '${AWS::Region}'
+        
+  AppSyncUserOpenAPIDataSource:
+    Type: 'AWS::AppSync::DataSource'
+    Properties:
+      ApiId: !GetAtt AppSyncOpenAPI.ApiId
+      Name: !Sub '${APIName}_user_openapi_data_source'
+      Description: Datasource for user table for aplication
+      Type: AMAZON_DYNAMODB
+      ServiceRoleArn: !GetAtt DynamoDBRole.Arn
+      DynamoDBConfig:
+        TableName: !Ref DynamoDBUserTable
+        AwsRegion: !Sub '${AWS::Region}'  
+        
+  AppSyncUserContributionDataSource:
+    Type: 'AWS::AppSync::DataSource'
+    Properties:
+      ApiId: !GetAtt AppSyncAPI.ApiId
+      Name: !Sub '${APIName}_userContribution_data_source'
+      Description: Datasource for UserContribution table for aplication
+      Type: AMAZON_DYNAMODB
+      ServiceRoleArn: !GetAtt DynamoDBRole.Arn
+      DynamoDBConfig:
+        TableName: !Ref DynamoDBUserContributionTable
+        AwsRegion: !Sub '${AWS::Region}'
+        
+  AppSyncUserContributionOpenPIDataSource:
+    Type: 'AWS::AppSync::DataSource'
+    Properties:
+      ApiId: !GetAtt AppSyncOpenAPI.ApiId
+      Name: !Sub '${APIName}_userContribution_openapi_data_source'
+      Description: Datasource for UserContribution table for aplication
+      Type: AMAZON_DYNAMODB
+      ServiceRoleArn: !GetAtt DynamoDBRole.Arn
+      DynamoDBConfig:
+        TableName: !Ref DynamoDBUserContributionTable
+        AwsRegion: !Sub '${AWS::Region}'
+        
+  AppSyncAllEventQueryResolver:
+    Type: "AWS::AppSync::Resolver"
+    DependsOn: AppSyncAPISchema
+    Properties:
+      ApiId: !GetAtt AppSyncAPI.ApiId
+      TypeName: Query
+      FieldName: eventall
+      DataSourceName: !GetAtt AppSyncEventDataSource.Name
+      RequestMappingTemplate: |
+        {
+            "version": "2017-02-28",
+            "operation" : "Scan",
+        }
+      ResponseMappingTemplate: |
+        $util.toJson($ctx.result.items)
+
+        
+  AppSyncEventByIdQueryResolver:
+    Type: "AWS::AppSync::Resolver"
+    DependsOn: AppSyncAPISchema
+    Properties:
+      ApiId: !GetAtt AppSyncAPI.ApiId
+      TypeName: Query
+      FieldName: event
+      DataSourceName: !GetAtt AppSyncEventDataSource.Name
+      RequestMappingTemplate: |
+        {
+          "version": "2017-02-28",
+          "operation": "GetItem",
+          "key": {
+            "id": $util.dynamodb.toDynamoDBJson($ctx.args.id),
+          }
+        }
+      ResponseMappingTemplate: |
+        $util.toJson($ctx.result)
+        
+  AppSyncOpenAPIEventByIdQueryResolver:
+    Type: "AWS::AppSync::Resolver"
+    DependsOn: AppSyncOpenAPISchema
+    Properties:
+      ApiId: !GetAtt AppSyncOpenAPI.ApiId
+      TypeName: Query
+      FieldName: event
+      DataSourceName: !GetAtt AppSyncEventDataOpenAPISource.Name
+      RequestMappingTemplate: |
+        {
+          "version": "2017-02-28",
+          "operation": "GetItem",
+          "key": {
+            "id": $util.dynamodb.toDynamoDBJson($ctx.args.id),
+          }
+        }
+      ResponseMappingTemplate: |
+        $util.toJson($ctx.result)
+
+  AppSyncEventByUserIdQueryResolver:
+    Type: "AWS::AppSync::Resolver"
+    DependsOn: AppSyncAPISchema
+    Properties:
+      ApiId: !GetAtt AppSyncAPI.ApiId
+      TypeName: Query
+      FieldName: eventUserId
+      DataSourceName: !GetAtt AppSyncEventDataSource.Name
+      RequestMappingTemplate: |
+        {
+          "version" : "2017-02-28",
+          "operation" : "Scan",
+          "filter" : {
+            "expression" : "organiserid = :id",
+              "expressionValues" : {
+                ":id" : $util.dynamodb.toDynamoDBJson($ctx.args.userId)
+              },
+            }
+        }
+      ResponseMappingTemplate: |
+        $util.toJson($ctx.result.items)
+        
+  AppSyncWishByIdQueryResolver:
+    Type: "AWS::AppSync::Resolver"
+    DependsOn: AppSyncAPISchema
+    Properties:
+      ApiId: !GetAtt AppSyncAPI.ApiId
+      TypeName: Query
+      FieldName: wish
+      DataSourceName: !GetAtt AppSyncWishDataSource.Name
+      RequestMappingTemplate: |
+        {
+          "version": "2017-02-28",
+          "operation": "GetItem",
+          "key": {
+            "id": $util.dynamodb.toDynamoDBJson($ctx.args.id),
+          }
+        }
+      ResponseMappingTemplate: |
+        $util.toJson($ctx.result)
+        
+  AppSyncUserQueryResolver:
+    Type: "AWS::AppSync::Resolver"
+    DependsOn: AppSyncAPISchema
+    Properties:
+      ApiId: !GetAtt AppSyncAPI.ApiId
+      TypeName: Query
+      FieldName: user
+      DataSourceName: !GetAtt AppSyncUserDataSource.Name
+      RequestMappingTemplate: |
+        {
+          "version": "2017-02-28",
+          "operation": "GetItem",
+          "key": {
+            "id": $util.dynamodb.toDynamoDBJson($ctx.args.id),
+          }
+        }
+      ResponseMappingTemplate: |
+        $util.toJson($ctx.result)
+        
+  AppSyncCreateEventResolver:
+    Type: "AWS::AppSync::Resolver"
+    DependsOn: AppSyncAPISchema
+    Properties:
+      ApiId: !GetAtt AppSyncAPI.ApiId
+      TypeName: Mutation
+      FieldName: createEvent
+      DataSourceName: !GetAtt AppSyncEventDataSource.Name
+      RequestMappingTemplate: |
+        {
+          "version" : "2017-02-28",
+          "operation" : "PutItem",
+          "key" : {
+            ## If object "id" should come from GraphQL arguments, change to $util.dynamodb.toDynamoDBJson($ctx.args.id)
+            "id": $util.dynamodb.toDynamoDBJson($util.autoId()),
+          },
+          "attributeValues" : $util.dynamodb.toMapValuesJson($ctx.args)
+        }
+      ResponseMappingTemplate: |
+        $util.toJson($ctx.result)
+        
+  AppSyncUpdateEventResolver:
+    Type: "AWS::AppSync::Resolver"
+    DependsOn: AppSyncAPISchema
+    Properties:
+      ApiId: !GetAtt AppSyncAPI.ApiId
+      TypeName: Mutation
+      FieldName: updateEvent
+      DataSourceName: !GetAtt AppSyncEventDataSource.Name
+      RequestMappingTemplate: |
+        {
+          "version" : "2017-02-28",
+          "operation" : "PutItem",
+          "key" : {
+            ## If object "id" should come from GraphQL arguments, change to $util.dynamodb.toDynamoDBJson($ctx.args.id)
+            "id": $util.dynamodb.toDynamoDBJson($ctx.args.id),
+          },
+          "attributeValues" : $util.dynamodb.toMapValuesJson($ctx.args)
+        }
+      ResponseMappingTemplate: |
+        $util.toJson($ctx.result)
+        
+  AppSyncDeleteEventResolver:
+    Type: "AWS::AppSync::Resolver"
+    DependsOn: AppSyncAPISchema
+    Properties:
+      ApiId: !GetAtt AppSyncAPI.ApiId
+      TypeName: Mutation
+      FieldName: deleteEvent
+      DataSourceName: !GetAtt AppSyncEventDataSource.Name
+      RequestMappingTemplate: |
+        {
+         "version" : "2017-02-28",
+         "operation" : "DeleteItem",
+         "key" : {
+            ## If your table's hash key is not named 'id', update it here. **
+            "id" : { "S" : "${ctx.args.id}" }
+            ## If your table has a sort key, add it as an item here. **
+          }
+        }
+      ResponseMappingTemplate: |
+        $util.toJson($ctx.result)
+          
+  AppSyncCreateWishResolver:
+    Type: "AWS::AppSync::Resolver"
+    DependsOn: AppSyncAPISchema
+    Properties:
+      ApiId: !GetAtt AppSyncAPI.ApiId
+      TypeName: Mutation
+      FieldName: createWish
+      DataSourceName: !GetAtt AppSyncWishDataSource.Name
+      RequestMappingTemplate: |
+        {
+          "version" : "2017-02-28",
+          "operation" : "PutItem",
+          "key" : {
+            ## If object "id" should come from GraphQL arguments, change to $util.dynamodb.toDynamoDBJson($ctx.args.id)
+            "id": $util.dynamodb.toDynamoDBJson($util.autoId()),
+          },
+          "attributeValues" : $util.dynamodb.toMapValuesJson($ctx.args)
+        }
+      ResponseMappingTemplate: |
+        $util.toJson($ctx.result)
+        
+  AppSyncUpdateWishResolver:
+    Type: "AWS::AppSync::Resolver"
+    DependsOn: AppSyncAPISchema
+    Properties:
+      ApiId: !GetAtt AppSyncAPI.ApiId
+      TypeName: Mutation
+      FieldName: updateWish
+      DataSourceName: !GetAtt AppSyncWishDataSource.Name
+      RequestMappingTemplate: |
+        {
+          "version" : "2017-02-28",
+          "operation" : "PutItem",
+          "key" : {
+            ## If object "id" should come from GraphQL arguments, change to $util.dynamodb.toDynamoDBJson($ctx.args.id)
+            "id": $util.dynamodb.toDynamoDBJson($ctx.args.id),
+          },
+          "attributeValues" : $util.dynamodb.toMapValuesJson($ctx.args)
+        }
+      ResponseMappingTemplate: |
+        $util.toJson($ctx.result)
+        
+  AppSyncDeleteWishResolver:
+    Type: "AWS::AppSync::Resolver"
+    DependsOn: AppSyncAPISchema
+    Properties:
+      ApiId: !GetAtt AppSyncAPI.ApiId
+      TypeName: Mutation
+      FieldName: deleteWish
+      DataSourceName: !GetAtt AppSyncWishDataSource.Name
+      RequestMappingTemplate: |
+        {
+         "version" : "2017-02-28",
+         "operation" : "DeleteItem",
+         "key" : {
+            ## If your table's hash key is not named 'id', update it here. **
+            "id" : { "S" : "${ctx.args.id}" }
+            ## If your table has a sort key, add it as an item here. **
+          }
+        }
+      ResponseMappingTemplate: |
+        $util.toJson($ctx.result)
+        
+  AppSyncCreateUserResolver:
+    Type: "AWS::AppSync::Resolver"
+    DependsOn: AppSyncAPISchema
+    Properties:
+      ApiId: !GetAtt AppSyncAPI.ApiId
+      TypeName: Mutation
+      FieldName: createUser
+      DataSourceName: !GetAtt AppSyncUserDataSource.Name
+      RequestMappingTemplate: |
+        {
+          "version" : "2017-02-28",
+          "operation" : "PutItem",
+          "key" : {
+            ## If object "id" should come from GraphQL arguments, change to $util.dynamodb.toDynamoDBJson($ctx.args.id)
+            "id": $util.dynamodb.toDynamoDBJson($util.autoId()),
+          },
+          "attributeValues" : $util.dynamodb.toMapValuesJson($ctx.args)
+        }
+      ResponseMappingTemplate: |
+        $util.toJson($ctx.result)
+        
+  AppSyncOpenAPICreateUserResolver:
+    Type: "AWS::AppSync::Resolver"
+    DependsOn: AppSyncOpenAPISchema
+    Properties:
+      ApiId: !GetAtt AppSyncOpenAPI.ApiId
+      TypeName: Mutation
+      FieldName: createUser
+      DataSourceName: !GetAtt AppSyncUserOpenAPIDataSource.Name
+      RequestMappingTemplate: |
+        {
+          "version" : "2017-02-28",
+          "operation" : "PutItem",
+          "key" : {
+            ## If object "id" should come from GraphQL arguments, change to $util.dynamodb.toDynamoDBJson($ctx.args.id)
+            "id": $util.dynamodb.toDynamoDBJson($util.autoId()),
+          },
+          "attributeValues" : $util.dynamodb.toMapValuesJson($ctx.args)
+        }
+      ResponseMappingTemplate: |
+        $util.toJson($ctx.result)
+        
+  AppSyncOpenAPiUpdateUserResolver:
+    Type: "AWS::AppSync::Resolver"
+    DependsOn: AppSyncOpenAPISchema
+    Properties:
+      ApiId: !GetAtt AppSyncOpenAPI.ApiId
+      TypeName: Mutation
+      FieldName: editUser
+      DataSourceName: !GetAtt AppSyncUserOpenAPIDataSource.Name
+      RequestMappingTemplate: |
+        {
+          "version" : "2017-02-28",
+          "operation" : "PutItem",
+          "key" : {
+            ## If object "id" should come from GraphQL arguments, change to $util.dynamodb.toDynamoDBJson($ctx.args.id)
+            "id": $util.dynamodb.toDynamoDBJson($ctx.args.id),
+          },
+          "attributeValues" : $util.dynamodb.toMapValuesJson($ctx.args)
+        }
+      ResponseMappingTemplate: |
+        $util.toJson($ctx.result)
+        
+  AppSyncUpdateUserResolver:
+    Type: "AWS::AppSync::Resolver"
+    DependsOn: AppSyncAPISchema
+    Properties:
+      ApiId: !GetAtt AppSyncAPI.ApiId
+      TypeName: Mutation
+      FieldName: editUser
+      DataSourceName: !GetAtt AppSyncUserDataSource.Name
+      RequestMappingTemplate: |
+        {
+          "version" : "2017-02-28",
+          "operation" : "PutItem",
+          "key" : {
+            ## If object "id" should come from GraphQL arguments, change to $util.dynamodb.toDynamoDBJson($ctx.args.id)
+            "id": $util.dynamodb.toDynamoDBJson($ctx.args.id),
+          },
+          "attributeValues" : $util.dynamodb.toMapValuesJson($ctx.args)
+        }
+      ResponseMappingTemplate: |
+        $util.toJson($ctx.result)
+        
+  AppSyncDeleteUserResolver:
+    Type: "AWS::AppSync::Resolver"
+    DependsOn: AppSyncAPISchema
+    Properties:
+      ApiId: !GetAtt AppSyncAPI.ApiId
+      TypeName: Mutation
+      FieldName: deleteUser
+      DataSourceName: !GetAtt AppSyncUserDataSource.Name
+      RequestMappingTemplate: |
+        {
+         "version" : "2017-02-28",
+         "operation" : "DeleteItem",
+         "key" : {
+            ## If your table's hash key is not named 'id', update it here. **
+            "id" : { "S" : "${ctx.args.id}" }
+            ## If your table has a sort key, add it as an item here. **
+          }
+        }
+      ResponseMappingTemplate: |
+        $util.toJson($ctx.result)
+        
+  AppSyncCreateUserContributionResolver:
+    Type: "AWS::AppSync::Resolver"
+    DependsOn: AppSyncAPISchema
+    Properties:
+      ApiId: !GetAtt AppSyncAPI.ApiId
+      TypeName: Mutation
+      FieldName: createParticipant
+      DataSourceName: !GetAtt AppSyncUserContributionDataSource.Name
+      RequestMappingTemplate: |
+        {
+          "version" : "2017-02-28",
+          "operation" : "PutItem",
+          "key" : {
+            ## If object "id" should come from GraphQL arguments, change to $util.dynamodb.toDynamoDBJson($ctx.args.id)
+            "id": $util.dynamodb.toDynamoDBJson($util.autoId()),
+          },
+          "attributeValues" : $util.dynamodb.toMapValuesJson($ctx.args)
+        }
+      ResponseMappingTemplate: |
+        $util.toJson($ctx.result)
+        
+  AppSyncOpenAPICreateUserContributionResolver:
+    Type: "AWS::AppSync::Resolver"
+    DependsOn: AppSyncOpenAPISchema
+    Properties:
+      ApiId: !GetAtt AppSyncOpenAPI.ApiId
+      TypeName: Mutation
+      FieldName: createParticipant
+      DataSourceName: !GetAtt AppSyncUserContributionOpenPIDataSource.Name
+      RequestMappingTemplate: |
+        {
+          "version" : "2017-02-28",
+          "operation" : "PutItem",
+          "key" : {
+            ## If object "id" should come from GraphQL arguments, change to $util.dynamodb.toDynamoDBJson($ctx.args.id)
+            "id": $util.dynamodb.toDynamoDBJson($util.autoId()),
+          },
+          "attributeValues" : $util.dynamodb.toMapValuesJson($ctx.args)
+        }
+      ResponseMappingTemplate: |
+        $util.toJson($ctx.result)
+        
+  AppSyncUpdateContributionResolver:
+    Type: "AWS::AppSync::Resolver"
+    DependsOn: AppSyncAPISchema
+    Properties:
+      ApiId: !GetAtt AppSyncAPI.ApiId
+      TypeName: Mutation
+      FieldName: editParticipant
+      DataSourceName: !GetAtt AppSyncUserContributionDataSource.Name
+      RequestMappingTemplate: |
+        {
+          "version" : "2017-02-28",
+          "operation" : "PutItem",
+          "key" : {
+            ## If object "id" should come from GraphQL arguments, change to $util.dynamodb.toDynamoDBJson($ctx.args.id)
+            "id": $util.dynamodb.toDynamoDBJson($ctx.args.id),
+          },
+          "attributeValues" : $util.dynamodb.toMapValuesJson($ctx.args)
+        }
+      ResponseMappingTemplate: |
+        $util.toJson($ctx.result)
+        
+  AppSyncDeleteContributionResolver:
+    Type: "AWS::AppSync::Resolver"
+    DependsOn: AppSyncAPISchema
+    Properties:
+      ApiId: !GetAtt AppSyncAPI.ApiId
+      TypeName: Mutation
+      FieldName: deleteParticipant
+      DataSourceName: !GetAtt AppSyncUserContributionDataSource.Name
+      RequestMappingTemplate: |
+        {
+         "version" : "2017-02-28",
+         "operation" : "DeleteItem",
+         "key" : {
+            ## If your table's hash key is not named 'id', update it here. **
+            "id" : { "S" : "${ctx.args.id}" }
+            ## If your table has a sort key, add it as an item here. **
+          }
+        }
+      ResponseMappingTemplate: |
+        $util.toJson($ctx.result)
+        
+  AppSyncWishEventResolver:
+    Type: "AWS::AppSync::Resolver"
+    DependsOn: AppSyncAPISchema
+    Properties:
+      ApiId: !GetAtt AppSyncAPI.ApiId
+      TypeName: Event
+      FieldName: wish
+      DataSourceName: !GetAtt AppSyncWishDataSource.Name
+      RequestMappingTemplate: |
+        {
+          "version" : "2017-02-28",
+          "operation" : "Scan",
+          "filter" : {
+            "expression" : "eventId = :id",
+              "expressionValues" : {
+                ":id" : $util.dynamodb.toDynamoDBJson($ctx.source.id)
+              },
+            }
+        }
+      ResponseMappingTemplate: |
+        $util.toJson($ctx.result.items)
+        
+  AppSyncWishEventOpenAPIResolver:
+    Type: "AWS::AppSync::Resolver"
+    DependsOn: AppSyncOpenAPISchema
+    Properties:
+      ApiId: !GetAtt AppSyncOpenAPI.ApiId
+      TypeName: Event
+      FieldName: wish
+      DataSourceName: !GetAtt AppSyncWishOpenAPIDataSource.Name
+      RequestMappingTemplate: |
+        {
+          "version" : "2017-02-28",
+          "operation" : "Scan",
+          "filter" : {
+            "expression" : "eventId = :id",
+              "expressionValues" : {
+                ":id" : $util.dynamodb.toDynamoDBJson($ctx.source.id)
+              },
+            }
+        }
+      ResponseMappingTemplate: |
+        $util.toJson($ctx.result.items)
+        
+  AppSyncEventWishResolver:
+    Type: "AWS::AppSync::Resolver"
+    DependsOn: AppSyncAPISchema
+    Properties:
+      ApiId: !GetAtt AppSyncAPI.ApiId
+      TypeName: Wish
+      FieldName: event
+      DataSourceName: !GetAtt AppSyncEventDataSource.Name
+      RequestMappingTemplate: |
+        {
+          "version": "2017-02-28",
+          "operation": "GetItem",
+          "key": {
+            "id": $util.dynamodb.toDynamoDBJson($ctx.source.eventId),
+          }
+        }
+      ResponseMappingTemplate: |
+        $util.toJson($ctx.result)
+        
+  AppSyncEventWishOpenAPIResolver:
+    Type: "AWS::AppSync::Resolver"
+    DependsOn: AppSyncOpenAPISchema
+    Properties:
+      ApiId: !GetAtt AppSyncOpenAPI.ApiId
+      TypeName: Wish
+      FieldName: event
+      DataSourceName: !GetAtt AppSyncEventDataOpenAPISource.Name
+      RequestMappingTemplate: |
+        {
+          "version": "2017-02-28",
+          "operation": "GetItem",
+          "key": {
+            "id": $util.dynamodb.toDynamoDBJson($ctx.source.eventId),
+          }
+        }
+      ResponseMappingTemplate: |
+        $util.toJson($ctx.result)
+        
+  AppSyncParticipantWishResolver:
+    Type: "AWS::AppSync::Resolver"
+    DependsOn: AppSyncAPISchema
+    Properties:
+      ApiId: !GetAtt AppSyncAPI.ApiId
+      TypeName: Wish
+      FieldName: participant
+      DataSourceName: !GetAtt AppSyncUserContributionDataSource.Name
+      RequestMappingTemplate: |
+        {
+          "version" : "2017-02-28",
+          "operation" : "Scan",
+          "filter" : {
+            "expression" : "wishId = :id",
+              "expressionValues" : {
+                ":id" : $util.dynamodb.toDynamoDBJson($ctx.source.id)
+              },
+            }
+        }
+      ResponseMappingTemplate: |
+        $util.toJson($ctx.result.items)
+        
+  AppSyncParticipantWishOpenAPIResolver:
+    Type: "AWS::AppSync::Resolver"
+    DependsOn: AppSyncOpenAPISchema
+    Properties:
+      ApiId: !GetAtt AppSyncOpenAPI.ApiId
+      TypeName: Wish
+      FieldName: participant
+      DataSourceName: !GetAtt AppSyncUserContributionOpenPIDataSource.Name
+      RequestMappingTemplate: |
+        {
+          "version" : "2017-02-28",
+          "operation" : "Scan",
+          "filter" : {
+            "expression" : "wishId = :id",
+              "expressionValues" : {
+                ":id" : $util.dynamodb.toDynamoDBJson($ctx.source.id)
+              },
+            }
+        }
+      ResponseMappingTemplate: |
+        $util.toJson($ctx.result.items)
+        
+  AppSyncWishParticipantResolver:
+    Type: "AWS::AppSync::Resolver"
+    DependsOn: AppSyncAPISchema
+    Properties:
+      ApiId: !GetAtt AppSyncAPI.ApiId
+      TypeName: UserContribution
+      FieldName: wish
+      DataSourceName: !GetAtt AppSyncWishDataSource.Name
+      RequestMappingTemplate: |
+        {
+          "version": "2017-02-28",
+          "operation": "GetItem",
+          "key": {
+            "id": $util.dynamodb.toDynamoDBJson($ctx.source.wishId),
+          }
+        }
+      ResponseMappingTemplate: |
+        $util.toJson($ctx.result)
+        
+  AppSyncWishParticipantOpenAPIResolver:
+    Type: "AWS::AppSync::Resolver"
+    DependsOn: AppSyncOpenAPISchema
+    Properties:
+      ApiId: !GetAtt AppSyncOpenAPI.ApiId
+      TypeName: UserContribution
+      FieldName: wish
+      DataSourceName: !GetAtt AppSyncWishOpenAPIDataSource.Name
+      RequestMappingTemplate: |
+        {
+          "version": "2017-02-28",
+          "operation": "GetItem",
+          "key": {
+            "id": $util.dynamodb.toDynamoDBJson($ctx.source.wishId),
+          }
+        }
+      ResponseMappingTemplate: |
+        $util.toJson($ctx.result)
+        
+  AppSyncUserParticipantResolver:
+    Type: "AWS::AppSync::Resolver"
+    DependsOn: AppSyncAPISchema
+    Properties:
+      ApiId: !GetAtt AppSyncAPI.ApiId
+      TypeName: UserContribution
+      FieldName: user
+      DataSourceName: !GetAtt AppSyncUserDataSource.Name
+      RequestMappingTemplate: |
+        {
+          "version": "2017-02-28",
+          "operation": "GetItem",
+          "key": {
+            "id": $util.dynamodb.toDynamoDBJson($ctx.source.userId),
+          }
+        }
+      ResponseMappingTemplate: |
+        $util.toJson($ctx.result)
+        
+  AppSyncUserParticipantOpenAPIResolver:
+    Type: "AWS::AppSync::Resolver"
+    DependsOn: AppSyncOpenAPISchema
+    Properties:
+      ApiId: !GetAtt AppSyncOpenAPI.ApiId
+      TypeName: UserContribution
+      FieldName: user
+      DataSourceName: !GetAtt AppSyncUserOpenAPIDataSource.Name
+      RequestMappingTemplate: |
+        {
+          "version": "2017-02-28",
+          "operation": "GetItem",
+          "key": {
+            "id": $util.dynamodb.toDynamoDBJson($ctx.source.userId),
+          }
+        }
+      ResponseMappingTemplate: |
+        $util.toJson($ctx.result)
+        
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${APIName}-webapp-bucket'
+      AccessControl: PublicRead
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: error.html
+  BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      PolicyDocument:
+        Id: MyPolicy
+        Version: 2012-10-17
+        Statement:
+          - Sid: PublicReadForGetBucketObjects
+            Effect: Allow
+            Principal: '*'
+            Action: 's3:GetObject'
+            Resource: !Join 
+              - ''
+              - - 'arn:aws:s3:::'
+                - !Ref S3Bucket
+                - /*
+      Bucket: !Ref S3Bucket
+        
+Outputs:
+  CognitoUserPoolId:
+    Description: The Pool ID of the Cognito User Pool
+    Value: !Ref UserPool
+  CognitoUserPoolClientId:
+    Description: The Client ID for AWS AppSync Auth
+    Value: !Ref UserPoolClient
+  DynamoDBEventTable:
+    Description: Dynamo DB Table for Event Data
+    Value: !Ref DynamoDBEventTable
+  DynamoDBWishTable:
+    Description: Dynamo DB Table for Event Data
+    Value: !Ref DynamoDBWishTable
+  DynamoDBUserContributionTable:
+    Description: Dynamo DB Table for Event Data
+    Value: !Ref DynamoDBUserContributionTable
+  DynamoDBUserTable:
+    Description: Dynamo DB Table for Event Data
+    Value: !Ref DynamoDBUserTable
+  GraphQLApiEndpoint:
+    Description: Wishlist URL
+    Value: !GetAtt AppSyncAPI.GraphQLUrl
+  GraphQLApiId:
+    Description: API Id for wishlist
+    Value: !GetAtt AppSyncAPI.ApiId
+  GraphQLOpenAPIEndoint:
+    Description: Open API Endpoint
+    Value: !GetAtt AppSyncOpenAPI.GraphQLUrl
+  GraphQLOpenAPIKey:
+    Description: Open API Key ID
+    Value: !GetAtt OpenAPIKey.ApiKey
+  WebsiteURL:
+    Value: !GetAtt 
+      - S3Bucket
+      - WebsiteURL
+    Description: URL for website hosted on S3
+  S3BucketSecureURL:
+    Value: !Join 
+      - ''
+      - - 'https://'
+        - !GetAtt 
+          - S3Bucket
+          - DomainName
+    Description: Name of S3 bucket to hold website content
