@@ -1,0 +1,43 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Wishlist Application infrastructure App Sync API and schema
+Parameters:
+  APIName:
+    Type: String
+    Description: Name of the API - used to generate unique names for resources
+    MinLength: 3
+    MaxLength: 20
+    AllowedPattern: '^[a-zA-Z][a-zA-Z0-9_]*$'
+
+  UserPoolID:
+    Type: String
+    Description: User Pool Id
+    MinLength: 3
+    MaxLength: 50
+    AllowedPattern: '^[a-zA-Z][a-zA-Z0-9_]*$'
+Resources:
+  #App Sync
+  AppSyncAPI:
+    Type: 'AWS::AppSync::GraphQLApi'
+    Description: The GraphQL API for the Application
+    Properties:
+      AuthenticationType: AWS_IAM
+      Name: !Sub '${APIName}'
+      UserPoolConfig:
+        UserPoolId: !Ref UserPoolID
+        AwsRegion: !Sub '${AWS::Region}'
+        DefaultAction: ALLOW
+
+  #AppSync Schema
+  AppSyncAPISchema:
+    Type: 'AWS::AppSync::GraphQLSchema'
+    Properties:
+      ApiId: !GetAtt AppSyncAPI.ApiId
+      Definition: "schema {\n    query: Query\n    mutation: Mutation\n}\ntype Query {\n    # Get a single value of type 'Post' by primary key.\n    event(id: ID!): Event\n    eventall: [Event]\n    eventUserId(userId: String!): [Event]\n  \twish(id: ID!): Wish\n  \tuser(id: ID!): User\n}\ntype Mutation {\n    createEvent(name: String, endDate: String, organiserid: String, code:Int): Event\n    updateEvent(id: ID!, name: String, endDate: String, organiserid: String, code:Int): Event\n    deleteEvent(id: ID!): Event\n    createWish(wish:String, amount: Int, eventId: String): Wish\n    updateWish(id: ID! , wish: String, amount: Int,eventId: String): Wish\n    deleteWish(\tid: ID!): Wish\n    createUser(name: String, contact: String, email: String): User\n    editUser(id: ID!, name: String, contact: String,email: String): User\n    deleteUser(id: ID!): User\n    createParticipant(userId: String, wishId: String, amount:Int): UserContribution\n    editParticipant(id: ID!,userId: String,amount: Int): UserContribution\n    deleteParticipant(id: ID!): UserContribution\n}\n\ntype Event {\n  id: ID!\n  name: String\n  endDate: String\n  code: Int\n  organiserid: String\n wish:[Wish] \n }\n\ntype User {\n  id: ID!\n  name: String\n  contact: String\n  email: String\n}\n\ntype UserContribution{\n  id: ID!\n  userId: String\n  wishId: String\n  amount: Int\n  user: User\n  wish: Wish\n}\n\ntype Wish {\n  id: ID!\n  wish: String\n  amount: String\n  event: Event\n  participant: [UserContribution]\n}\n"
+
+Outputs:
+  GraphQLApiEndpoint:
+    Description: Wishlist URL
+    Value: !GetAtt AppSyncAPI.GraphQLUrl
+  GraphQLApiId:
+    Description: API Id for wishlist
+    Value: !GetAtt AppSyncAPI.ApiId

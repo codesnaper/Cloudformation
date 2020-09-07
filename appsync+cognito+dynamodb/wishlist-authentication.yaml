@@ -1,0 +1,222 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Wishlist Application infrastructure for Authorization
+Parameters:
+  APIName:
+    Type: String
+    Description: Name of the API - used to generate unique names for resources
+    MinLength: 3
+    MaxLength: 20
+    AllowedPattern: '^[a-zA-Z][a-zA-Z0-9_]*$'
+  DynamoDBEventTableARN:
+    Type: String
+    Description: DynamoDB Event Table ARN
+    MinLength: 3
+    MaxLength: 50
+    AllowedPattern: '^[a-zA-Z][a-zA-Z0-9_]*$'
+  DynamoDBWishTableArn:
+    Type: String
+    Description: DynamoDBWishTable ARN
+    MinLength: 3
+    MaxLength: 50
+    AllowedPattern: '^[a-zA-Z][a-zA-Z0-9_]*$'
+  DynamoDBUserContributionTable:
+    Type: String
+    Description: DynamoDBUserContributionTable ARN
+    MinLength: 3
+    MaxLength: 50
+    AllowedPattern: '^[a-zA-Z][a-zA-Z0-9_]*$'
+  DynamoDBUserTableARN:
+    Type: String
+    Description: DynamoDBUserTable Arn
+    MinLength: 3
+    MaxLength: 50
+    AllowedPattern: '^[a-zA-Z][a-zA-Z0-9_]*$'
+Resources:
+  #Basic Execution Role to allow cognito to consume
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${APIName}-lambda-basic-role'
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action:
+            - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+              - lambda.amazonaws.com
+        Version: 2012-10-17
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSLambdaExecute
+      Path: /
+
+  #Create Lambda function to auto-confirm user without code
+  PreSignUpLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: nodejs12.x
+      Role: !GetAtt LambdaRole.Arn
+      Handler: index.handler
+      Code:
+        ZipFile: |
+          exports.handler = (event, context, callback) => {
+            event.response.autoConfirmUser = true;
+            callback(null,event);
+          };
+      Description: Invoke a function during stack creation.
+
+  # User pool
+  UserPool:
+    Type: 'AWS::Cognito::UserPool'
+    DependsOn: PreSignUpLambda
+    Description: A Cognito user pool for authenticating users
+    Properties:
+      UserPoolName: !Sub '${APIName}-user-pool'
+      LambdaConfig:
+        PreSignUp: !GetAtt PreSignUpLambda.Arn
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Mutable: true
+          Required: true
+        - Name: name
+          AttributeDataType: String
+          Mutable: false
+          Required: true
+
+  #Lambda Execution permission to Cognito
+  LambdaSignUpPermission:
+      Type: 'AWS::Lambda::Permission'
+      Properties:
+        Action: "lambda:InvokeFunction"
+        FunctionName:
+          Fn::GetAtt: [ "PreSignUpLambda", "Arn"]
+        Principal: "cognito-idp.amazonaws.com"
+        SourceArn: !GetAtt UserPool.Arn
+
+  #User Pool client id
+  UserPoolClient:
+    Type: 'AWS::Cognito::UserPoolClient'
+    Description: App Client used by AWS AppSync
+    Properties:
+      ClientName: !Sub '${APIName}-client-id'
+      GenerateSecret: false
+      UserPoolId: !Ref UserPool
+
+  #Authorized policy
+  AuthenticatedDynamoDBPolicy:
+    Type: 'AWS::IAM::ManagedPolicy'
+    Properties:
+      Description: Policy for app sync to create table using dynamo db
+      Path: /appsync/
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - 'dynamodb:GetItem'
+              - 'dynamodb:PutItem'
+              - 'dynamodb:DeleteItem'
+              - 'dynamodb:UpdateItem'
+              - 'dynamodb:Query'
+              - 'dynamodb:Scan'
+              - 'dynamodb:BatchGetItem'
+              - 'dynamodb:BatchWriteItem'
+            Resource:
+              - !Join [ "", [ !Sub '${DynamoDBEventTableARN}', "*" ] ]
+              - !Join [ "", [ !Sub '${DynamoDBWishTableArn}', "*" ] ]
+              - !Join [ "", [ !Sub '${DynamoDBUserContributionTable}', "*" ] ]
+              - !Join [ "", [ !Sub '${DynamoDBUserTableARN}', "*" ] ]
+
+  #Unauthorized Policy
+  UnauthenticatedDynamoDBPolicy:
+    Type: 'AWS::IAM::ManagedPolicy'
+    Properties:
+      Description: Policy for app sync to access table using dynamo db for unauthenticated role
+      Path: /appsync/
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - 'dynamodb:GetItem'
+              - 'dynamodb:PutItem'
+              - 'dynamodb:DeleteItem'
+              - 'dynamodb:UpdateItem'
+              - 'dynamodb:Query'
+              - 'dynamodb:Scan'
+            Resource:
+              - !Join [ "", [ !Sub '${DynamoDBUserContributionTable}', "*" ] ]
+              - !Join [ "", [ !Sub '${DynamoDBUserTableARN}', "*" ] ]
+
+  #Role consuming Authorized policy
+  DynamoDBRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: !Sub '${APIName}-dynamodb-role'
+      ManagedPolicyArns:
+        - Ref: AuthenticatedDynamoDBPolicy
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - 'sts:AssumeRole'
+            Condition:
+              StringEquals:
+                "cognito-identity.amazonaws.com:aud": !Ref IdentityPool
+              "ForAnyValue:StringLike":
+                "cognito-identity.amazonaws.com:amr": authenticated
+    DependsOn:
+      - AuthenticatedDynamoDBPolicy
+
+  #Role consuming Unauthorized policy
+  UnauthenticatedDynamoDBRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: !Sub '${APIName}-unauthenticated-dynamodb-role'
+      ManagedPolicyArns:
+        - Ref: UnauthenticatedDynamoDBPolicy
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - 'sts:AssumeRole'
+            Condition:
+              StringEquals:
+                "cognito-identity.amazonaws.com:aud": !Ref IdentityPool
+              "ForAnyValue:StringLike":
+                "cognito-identity.amazonaws.com:amr": unauthenticated
+    DependsOn:
+      - UnauthenticatedDynamoDBPolicy
+
+  # Identity Pool
+  IdentityPool:
+    Type: "AWS::Cognito::IdentityPool"
+    Properties:
+      IdentityPoolName: '${APIName}-identity-pool'
+      AllowUnauthenticatedIdentities: true
+      CognitoIdentityProviders:
+        - ClientId: !Ref UserPoolClient
+          ProviderName: !GetAtt UserPool.ProviderName
+
+  # Identity pool mapping role
+  IdentityPoolRoleMapping:
+    Type: "AWS::Cognito::IdentityPoolRoleAttachment"
+    Properties:
+      IdentityPoolId: !Ref IdentityPool
+      Roles:
+        authenticated: !GetAtt DynamoDBRole.Arn
+        unauthenticated: !GetAtt UnauthenticatedDynamoDBRole.Arn
+
+Outputs:
+  CognitoUserPoolId:
+    Description: The Pool ID of the Cognito User Pool
+    Value: !Ref UserPool
+  CognitoUserPoolClientId:
+    Description: The Client ID for AWS AppSync Auth
+    Value: !Ref UserPoolClient
+  IdentityPool:
+    Description: Identity Pool id
+    Value: !Ref IdentityPool

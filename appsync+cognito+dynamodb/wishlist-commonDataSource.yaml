@@ -1,0 +1,49 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Wishlist Application infrastructure for Datasource for DynamoDB Table
+Parameters:
+  APIName:
+    Type: String
+    Description: Name of the API - used to generate unique names for resources
+    MinLength: 3
+    MaxLength: 20
+    AllowedPattern: '^[a-zA-Z][a-zA-Z0-9_]*$'
+
+  AppSyncAPIID:
+    Type: String
+    Description: API Id for appsyc
+    MinLength: 3
+    MaxLength: 50
+    AllowedPattern: '^[a-zA-Z][a-zA-Z0-9_]*$'
+
+  DynamoDBAuthorizedRoleARN:
+    Type: String
+    Description: Arn of authorized role for dynamodb
+    MinLength: 3
+    MaxLength: 50
+    AllowedPattern: '^[a-zA-Z][a-zA-Z0-9_]*$'
+
+  DynamoDBTableName:
+    Type: String
+    Description: DynamoDB Table name
+    MinLength: 3
+    MaxLength: 50
+    AllowedPattern: '^[a-zA-Z][a-zA-Z0-9_]*$'
+
+Resources:
+  #Common DynamoDB Data Source
+  AppSyncDataSource:
+    Type: 'AWS::AppSync::DataSource'
+    Properties:
+      ApiId: !Ref AppSyncAPIID
+      Name: !Sub '${APIName}_event_data_source'
+      Description: Datasource for aplication
+      Type: AMAZON_DYNAMODB
+      ServiceRoleArn: !Ref DynamoDBAuthorizedRoleARN
+      DynamoDBConfig:
+        TableName: !Ref DynamoDBTableName
+        AwsRegion: !Sub '${AWS::Region}'
+
+Outputs:
+  DataSourceName:
+    Description: Dynamo DB Table for Event Data
+    Value: !GetAtt AppSyncDataSource.Name

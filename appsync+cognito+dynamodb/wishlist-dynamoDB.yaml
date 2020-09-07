@@ -1,0 +1,92 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Wishlist Application infrastructure for DynamoDB Table
+Parameters:
+  APIName:
+    Type: String
+    Description: Name of the API - used to generate unique names for resources
+    MinLength: 3
+    MaxLength: 20
+    AllowedPattern: '^[a-zA-Z][a-zA-Z0-9_]*$'
+Resources:
+  DynamoDBEventTable:
+    Type: 'AWS::DynamoDB::Table'
+    Description: Dynamo DB event table
+    Properties:
+      TableName: !Sub '${APIName}-event-table'
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      ProvisionedThroughput:
+        ReadCapacityUnits: 2
+        WriteCapacityUnits: 2
+  DynamoDBWishTable:
+    Type: 'AWS::DynamoDB::Table'
+    Description: Dynamo DB wish table
+    Properties:
+      TableName: !Sub '${APIName}-wish-table'
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      ProvisionedThroughput:
+        ReadCapacityUnits: 2
+        WriteCapacityUnits: 2
+  DynamoDBUserContributionTable:
+    Type: 'AWS::DynamoDB::Table'
+    Description: Dynamo DB usercontribution table
+    Properties:
+      TableName: !Sub '${APIName}-contribution-table'
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      ProvisionedThroughput:
+        ReadCapacityUnits: 2
+        WriteCapacityUnits: 2
+  DynamoDBUserTable:
+    Type: 'AWS::DynamoDB::Table'
+    Description: Dynamo DB User table
+    Properties:
+      TableName: !Sub '${APIName}-user-table'
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      ProvisionedThroughput:
+        ReadCapacityUnits: 2
+        WriteCapacityUnits: 2
+
+Outputs:
+  DynamoDBEventTableARN:
+    Description: Dynamo DB Table for Event Data
+    Value: !GetAtt DynamoDBEventTable.Arn
+  DynamoDBWishTableARN:
+    Description: Dynamo DB Table for Event Data
+    Value: !GetAtt DynamoDBWishTable.Arn
+  DynamoDBUserContributionTableARN:
+    Description: Dynamo DB Table for Event Data
+    Value: !GetAtt DynamoDBUserContributionTable.Arn
+  DynamoDBUserTableARN:
+    Description: Dynamo DB Table for Event Data
+    Value: !GetAtt DynamoDBUserTable.Arn
+DynamoDBEventTable:
+  Description: Dynamo DB Table for Event Data
+  Value: !Ref DynamoDBEventTable
+DynamoDBWishTable:
+  Description: Dynamo DB Table for Event Data
+  Value: !Ref DynamoDBWishTable
+DynamoDBUserContributionTable:
+  Description: Dynamo DB Table for Event Data
+  Value: !Ref DynamoDBUserContributionTable
+DynamoDBUserTable:
+  Description: Dynamo DB Table for Event Data
+  Value: !Ref DynamoDBUserTable
